@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THE TREE</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+
+    <style>
+        body { background-color: #050505; margin: 0; overflow: hidden; font-family: sans-serif; color: white; }
+        .node circle { stroke: #ff0000; stroke-width: 2px; filter: drop-shadow(0 0 8px rgba(255, 0, 0, 0.9)); cursor: pointer; transition: 0.3s; }
+        .link { fill: none; stroke: rgba(255, 0, 0, 0.25); stroke-width: 1.5px; }
+        .node text { fill: #ff9999; font-size: 11px; text-shadow: 0 0 5px rgba(255, 0, 0, 0.5); pointer-events: none; user-select: none; }
+        
+        .controls {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px; background: rgba(15, 0, 0, 0.95);
+            padding: 10px 15px; border-radius: 50px; border: 1px solid #ff0000; z-index: 100;
+        }
+        
+        button {
+            background: #ff0000; border: none; color: white; width: 42px; height: 42px;
+            border-radius: 50%; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+            transition: 0.3s;
+        }
+        button:hover { background: #fff; color: #ff0000; box-shadow: 0 0 15px #fff; }
+
+        .selected circle { stroke: #fff !important; stroke-width: 4px; filter: drop-shadow(0 0 15px #fff); }
+        #mode-tag { position: fixed; top: 10px; left: 10px; color: #ff0000; font-size: 10px; opacity: 0.6; }
+
+        #lock-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: #000; z-index: 999; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center;
+        }
+        #lock-screen input {
+            background: #110000; border: 1px solid #ff0000; color: white;
+            padding: 12px; border-radius: 8px; text-align: center; outline: none; margin-bottom: 15px; width: 260px;
+        }
+        #error-msg { color: #ff0000; font-size: 14px; margin-top: 10px; min-height: 20px; }
+    </style>
+</head>
+<body>
+
+<div id="lock-screen">
+    <h1 style="color: #ff0000; text-shadow: 0 0 20px #ff0000; letter-spacing: 5px; margin-bottom: 30px;">THE TREE</h1>
+    <div id="input-container">
+        <input type="password" id="vault-pass" placeholder="أدخل مفتاح التشفير">
+        <br>
+        <button onclick="unlockVault()" style="width: 140px; border-radius: 8px; margin: auto;">فتح</button>
+    </div>
+    <div id="error-msg"></div>
+</div>
+
+<div id="mode-tag">وضع الرؤية</div>
+
+<div class="controls">
+    <button id="add-btn" style="display:none;" title="إضافة فرع">+</button>
+    <button id="edit-text-btn" style="display:none;" title="تعديل الاسم">📝</button>
+    <button id="del-btn" style="display:none;" title="حذف">🗑️</button>
+    <button id="change-pass-btn" style="display:none;" title="تغيير كلمة السر">🔧</button>
+    <button id="mode-toggle" title="تبديل الوضع">✏️</button>
+</div>
+
+<script>
+    const firebaseConfig = {
+        apiKey: "AIzaSyBB_15ns50fO29tTACfauOReG--fk0y2oM",
+        authDomain: "my-tree-493514.firebaseapp.com",
+        databaseURL: "https://my-tree-493514-default-rtdb.asia-southeast1.firebasedatabase.app",
+        projectId: "my-tree-493514",
+        storageBucket: "my-tree-493514.firebasestorage.app",
+        messagingSenderId: "302435563073",
+        appId: "1:302435563073:web:f75a59be1b6c0900e038c0"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    let treeData = null;
+    let selectedNodeId = null;
+    let isEditMode = false;
+    let encryptionKey = "";
+    let attemptCount = 0;
+
+    function encrypt(data, key) { return CryptoJS.AES.encrypt(JSON.stringify(data), key).toString(); }
+    function decrypt(cipherText, key) {
+        try {
+            const bytes = CryptoJS.AES.decrypt(cipherText, key);
+            const decoded = bytes.toString(CryptoJS.enc.Utf8);
+            return decoded ? JSON.parse(decoded) : null;
+        } catch (e) { return null; }
+    }
+
+    function saveToCloud() {
+        if (!treeData || !encryptionKey) return;
+        db.ref('vault/tree').set(encrypt(treeData, encryptionKey));
+    }
+
+    function unlockVault() {
+        const blockTime = localStorage.getItem('block_until');
+        if (blockTime && Date.now() < blockTime) { updateCountdown(blockTime); return; }
+
+        const pass = document.getElementById("vault-pass").value;
+        if (!pass) return;
+
+        db.ref('vault/tree').once('value').then((snapshot) => {
+            const cloudData = snapshot.val();
+            if (cloudData) {
+                const data = decrypt(cloudData, pass);
+                if (data) {
+                    encryptionKey = pass;
+                    treeData = data;
+                    document.getElementById("lock-screen").style.display = "none";
+                    initGraph();
+                    db.ref('vault/tree').on('value', (s) => {
+                        const val = s.val();
+                        if (val) {
+                            const d = decrypt(val, encryptionKey);
+                            if (d) { treeData = d; update(); }
+                        }
+                    });
+                } else { handleWrongPass(); }
+            } else {
+                if (confirm(`هل تريد اعتماد كلمة السر الجديدة: (${pass})؟`)) {
+                    encryptionKey = pass;
+                    treeData = { name: "المركز", children: [], id: "root", collapsed: false };
+                    saveToCloud();
+                    document.getElementById("lock-screen").style.display = "none";
+                    initGraph();
+                }
+            }
+        });
+    }
+
+    function handleWrongPass() {
+        attemptCount++;
+        const errorDiv = document.getElementById("error-msg");
+        if (attemptCount >= 5) {
+            const blockUntil = Date.now() + (5 * 60 * 1000);
+            localStorage.setItem('block_until', blockUntil);
+            updateCountdown(blockUntil);
+        } else { errorDiv.innerText = `كلمة السر خطأ! المحاولات المتبقية: ${5 - attemptCount}`; }
+    }
+
+    function updateCountdown(until) {
+        const errorDiv = document.getElementById("error-msg");
+        const interval = setInterval(() => {
+            const remaining = Math.ceil((until - Date.now()) / 1000);
+            if (remaining <= 0) {
+                clearInterval(interval); errorDiv.innerText = ""; attemptCount = 0;
+                localStorage.removeItem('block_until');
+            } else { errorDiv.innerText = `الجهاز محظور. حاول بعد ${Math.floor(remaining/60)}:${(remaining%60).toString().padStart(2,'0')}`; }
+        }, 1000);
+    }
+
+    document.getElementById("change-pass-btn").onclick = () => {
+        const oldPass = prompt("أدخل كلمة السر القديمة:");
+        if (oldPass !== encryptionKey) return alert("كلمة السر القديمة غير صحيحة!");
+        const newPass = prompt("أدخل كلمة السر الجديدة:");
+        if (!newPass) return;
+        const confirmPass = prompt("يرجى تأكيد الكلمة الجديدة:");
+        if (newPass !== confirmPass) return alert("ليس هناك تطابق");
+        encryptionKey = newPass;
+        saveToCloud();
+        alert("تم تغيير كلمة السر بنجاح!");
+    };
+
+    let svg, g, treeLayout;
+    function initGraph() {
+        if (svg) d3.select("svg").remove();
+        svg = d3.select("body").append("svg")
+            .attr("width", window.innerWidth).attr("height", window.innerHeight)
+            .call(d3.zoom().scaleExtent([0.1, 3]).on("zoom", (e) => g.attr("transform", e.transform)))
+            .append("g");
+        g = svg.append("g").attr("transform", `translate(100, ${window.innerHeight/2})`);
+        treeLayout = d3.tree().nodeSize([80, 250]);
+        update();
+    }
+
+    function update() {
+        if (!treeData) return;
+        const root = d3.hierarchy(treeData, d => d.collapsed ? null : d.children);
+        treeLayout(root);
+        const nodes = root.descendants();
+        const links = root.links();
+
+        const link = g.selectAll(".link").data(links, d => d.target.data.id);
+        link.enter().append("path").attr("class", "link").merge(link)
+            .transition().duration(400).attr("d", d3.linkHorizontal().x(d => d.y).y(d => d.x));
+        link.exit().remove();
+
+        const node = g.selectAll(".node").data(nodes, d => d.data.id);
+        const nodeEnter = node.enter().append("g").attr("class", "node")
+            .on("click", (event, d) => {
+                if (isEditMode) {
+                    selectedNodeId = d.data.id;
+                    update();
+                } else {
+                    if (d.data.name.startsWith('http')) window.open(d.data.name, '_blank');
+                    else { toggleNode(treeData, d.data.id); saveToCloud(); update(); }
+                }
+            });
+
+        nodeEnter.append("circle").attr("r", 10);
+        nodeEnter.append("text").attr("dy", "1.5em").attr("text-anchor", "middle");
+
+        const nodeUpdate = nodeEnter.merge(node);
+        nodeUpdate.transition().duration(400).attr("transform", d => `translate(${d.y},${d.x})`);
+        nodeUpdate.classed("selected", d => d.data.id === selectedNodeId);
+        nodeUpdate.select("circle").style("fill", d => d.data.collapsed ? "#220000" : `rgb(${Math.max(40, 255 - d.depth*50)}, 0, 0)`);
+        nodeUpdate.select("text").text(d => d.data.name.startsWith('http') ? "🔗 رابط" : d.data.name);
+        node.exit().remove();
+    }
+
+    function toggleNode(data, id) {
+        if (data.id === id) {
+            data.collapsed = !data.collapsed;
+            if (data.collapsed && data.children) {
+                (function rec(n){ n.children.forEach(c=>{c.collapsed=true; if(c.children) rec(c);}) })(data);
+            }
+            return true;
+        }
+        if (data.children) for (let c of data.children) if (toggleNode(c, id)) return true;
+        return false;
+    }
+
+    document.getElementById("mode-toggle").onclick = () => {
+        isEditMode = !isEditMode;
+        document.getElementById("mode-toggle").innerHTML = isEditMode ? "✅" : "✏️";
+        document.getElementById("mode-tag").innerHTML = isEditMode ? "وضع التعديل" : "وضع الرؤية";
+        ["add-btn", "del-btn", "edit-text-btn", "change-pass-btn"].forEach(id => {
+            document.getElementById(id).style.display = isEditMode ? "flex" : "none";
+        });
+        if (!isEditMode) { selectedNodeId = null; }
+        update();
+    };
+
+    // --- دالة الإضافة المُصلحة ---
+    document.getElementById("add-btn").onclick = () => {
+        if (!selectedNodeId) return alert("اختر فرعاً أولاً!");
+        const name = prompt("الاسم أو الرابط الجديد:");
+        if (name) {
+            const findAndAdd = (d) => {
+                if (d.id === selectedNodeId) {
+                    if (!d.children) d.children = [];
+                    d.children.push({ name: name, children: [], id: "n" + Date.now(), collapsed: false });
+                    return true;
+                }
+                if (d.children) {
+                    for (let i = 0; i < d.children.length; i++) {
+                        if (findAndAdd(d.children[i])) return true;
+                    }
+                }
+                return false;
+            };
+            findAndAdd(treeData);
+            saveToCloud();
+            update();
+        }
+    };
+
+    document.getElementById("del-btn").onclick = () => {
+        if (!selectedNodeId || selectedNodeId === "root") return alert("لا يمكن حذف المركز!");
+        if (confirm("حذف؟")) {
+            const del = (p) => {
+                if (p.children) {
+                    const i = p.children.findIndex(c => c.id === selectedNodeId);
+                    if (i > -1) { p.children.splice(i, 1); return true; }
+                    for (let c of p.children) if (del(c)) return true;
+                }
+                return false;
+            };
+            del(treeData); selectedNodeId = null; saveToCloud(); update();
+        }
+    };
+
+    document.getElementById("edit-text-btn").onclick = () => {
+        if (!selectedNodeId) return alert("اختر فرعاً!");
+        const newName = prompt("تعديل الاسم:");
+        if (newName) {
+            const ed = (d) => {
+                if (d.id === selectedNodeId) { d.name = newName; return true; }
+                if (d.children) for (let c of d.children) if (ed(c)) return true;
+                return false;
+            };
+            ed(treeData); saveToCloud(); update();
+        }
+    };
+
+    window.onresize = () => { if(svg) d3.select("svg").attr("width", window.innerWidth).attr("height", window.innerHeight); };
+</script>
+</body>
+</html>
